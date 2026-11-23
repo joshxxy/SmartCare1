@@ -141,6 +141,7 @@ export function DoctorPortal({ tab, setTab, session, onNotice }: DoctorPortalPro
   });
 
   const [carePlanEdit, setCarePlanEdit] = useState({
+    phone: '',
     status: 'Monitoring' as Patient['status'],
     monitoring_frequency: 'daily' as Patient['monitoring_frequency'],
     language: 'English' as SupportedLanguage,
@@ -197,6 +198,7 @@ export function DoctorPortal({ tab, setTab, session, onNotice }: DoctorPortalPro
       setPatientAlerts(pAlerts);
       setPatientDocs(docs);
       setCarePlanEdit({
+        phone: detail.phone || '',
         status: detail.status,
         monitoring_frequency: detail.monitoring_frequency,
         language: detail.language,
@@ -456,6 +458,22 @@ export function DoctorPortal({ tab, setTab, session, onNotice }: DoctorPortalPro
       onNotice('Multilingual WhatsApp & Voice reminder dispatched to patient phone.');
     } catch (err) {
       onNotice(err instanceof Error ? err.message : 'Could not send test reminder.');
+    } finally {
+      setBusyAction(false);
+    }
+  }
+
+  async function handleResetPatientPassword(patientId: number) {
+    setBusyAction(true);
+    try {
+      const creds = await apiFetch<CreatedCredentials>(`/api/patients/${patientId}/reset-password`, {
+        method: 'POST',
+      });
+      setCreatedCreds(creds);
+      setCopiedCreds(false);
+      onNotice(`Temporary login password reset for ${creds.username}.`);
+    } catch (err) {
+      onNotice(err instanceof Error ? err.message : 'Could not reset patient password.');
     } finally {
       setBusyAction(false);
     }
@@ -851,15 +869,26 @@ export function DoctorPortal({ tab, setTab, session, onNotice }: DoctorPortalPro
                       )}
                     </div>
 
-                    <button
-                      type="button"
-                      disabled={busyAction}
-                      onClick={() => handleSendTestReminder(patientDetail.id)}
-                      className="px-3.5 py-2 text-xs font-semibold bg-teal-700 hover:bg-teal-800 text-white rounded-lg flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                      Send {patientDetail.language} Reminder
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={busyAction}
+                        onClick={() => handleResetPatientPassword(patientDetail.id)}
+                        className="px-3.5 py-2 text-xs font-semibold border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 rounded-lg flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                      >
+                        <KeyRound className="w-3.5 h-3.5" />
+                        Reset Patient Password
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busyAction}
+                        onClick={() => handleSendTestReminder(patientDetail.id)}
+                        className="px-3.5 py-2 text-xs font-semibold bg-teal-700 hover:bg-teal-800 text-white rounded-lg flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        Send {patientDetail.language} Reminder
+                      </button>
+                    </div>
                   </div>
 
                   {/* Sub-Navigation Tabs */}
@@ -950,13 +979,26 @@ export function DoctorPortal({ tab, setTab, session, onNotice }: DoctorPortalPro
                           </div>
                         </div>
 
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-700 mb-1">Diagnosis</label>
-                          <input
-                            value={carePlanEdit.diagnosis}
-                            onChange={(e) => setCarePlanEdit({ ...carePlanEdit, diagnosis: e.target.value })}
-                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
-                          />
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">
+                              Patient Phone (WhatsApp & Voice)
+                            </label>
+                            <input
+                              value={carePlanEdit.phone}
+                              onChange={(e) => setCarePlanEdit({ ...carePlanEdit, phone: e.target.value })}
+                              placeholder="+91 98000 00000"
+                              className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">Diagnosis</label>
+                            <input
+                              value={carePlanEdit.diagnosis}
+                              onChange={(e) => setCarePlanEdit({ ...carePlanEdit, diagnosis: e.target.value })}
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            />
+                          </div>
                         </div>
 
                         <div>

@@ -767,6 +767,7 @@ export function registerApiRoutes(app: express.Application): void {
 
     const {
       status,
+      phone,
       monitoring_frequency,
       monitoring_requirements,
       language,
@@ -785,6 +786,11 @@ export function registerApiRoutes(app: express.Application): void {
     }
 
     runInTransaction(() => {
+      if (phone !== undefined && String(phone).trim()) {
+        const cleanPhone = String(phone).trim();
+        db.prepare(`UPDATE patients SET phone = ? WHERE id = ?`).run(cleanPhone, patientId);
+        db.prepare(`UPDATE users SET phone = ? WHERE patient_id = ?`).run(cleanPhone, patientId);
+      }
       if (status && ['Monitoring', 'Attention Required', 'Stable', 'Discharged'].includes(String(status))) {
         db.prepare(`UPDATE patients SET status = ? WHERE id = ?`).run(String(status), patientId);
       }
@@ -848,6 +854,53 @@ export function registerApiRoutes(app: express.Application): void {
 
     res.json({ message: 'Patient care plan updated.' });
   });
+
+  app.post(
+    '/api/patients/:id/reset-password',
+    requireAuth,
+    requireRoles('doctor'),
+    (req: AuthenticatedRequest, res: Response) => {
+      const patientId = Number(req.params.id);
+      if (!ensurePatientExistsAndAccess(req.user!, patientId, res)) return;
+
+      const patient = db
+        .prepare(`SELECT id, patient_code FROM patients WHERE id = ?`)
+        .get(patientId) as { id: number; patient_code: string };
+
+      const userRow = db
+        .prepare(`SELECT id, username FROM users WHERE patient_id = ? AND role = 'patient'`)
+        .get(patientId) as { id: number; username: string } | undefined;
+
+      if (!userRow) {
+        res.status(404).json({ detail: 'Linked patient login account not found.' });
+        return;
+      }
+
+      const temporaryPassword = crypto.randomBytes(9).toString('base64url');
+      const passwordHash = hashPassword(temporaryPassword);
+
+      db.prepare(
+        `UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?`
+      ).run(passwordHash, userRow.id);
+
+      recordAuditLog({
+        user: req.user,
+        action: 'PATIENT_PASSWORD_RESET',
+        entityType: 'patient',
+        entityId: patientId,
+        details: `Doctor issued new one-time temporary password for ${userRow.username}`,
+        ipAddress: getClientIp(req),
+      });
+
+      res.json({
+        patient_id: patient.id,
+        patient_code: patient.patient_code,
+        username: userRow.username,
+        temporary_password: temporaryPassword,
+        note: 'New one-time temporary password generated. Patient must change it after signing in.',
+      });
+    }
+  );
 
   // ==========================================================
   // NURSE ASSIGNMENT & FOLLOW-UP VISITS

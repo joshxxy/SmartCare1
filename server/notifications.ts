@@ -217,7 +217,25 @@ export async function dispatchWhatsAppDelivery(deliveryId: number): Promise<void
 
   try {
     const templateName = getWhatsAppTemplateName(row.language);
-    const langCode = getWhatsAppTemplateLangCode(row.language);
+    const isHelloWorld = templateName === 'hello_world';
+    const langCode = isHelloWorld ? 'en_US' : getWhatsAppTemplateLangCode(row.language);
+
+    const templatePayload: Record<string, unknown> = {
+      name: templateName,
+      language: { code: langCode },
+    };
+
+    if (!isHelloWorld) {
+      templatePayload.components = [
+        {
+          type: 'body',
+          parameters: [
+            { type: 'text', text: row.patient_name },
+            { type: 'text', text: row.alert_message.slice(0, 200) },
+          ],
+        },
+      ];
+    }
 
     const response = await fetch(
       `https://graph.facebook.com/${apiVersion}/${encodeURIComponent(phoneNumberId)}/messages`,
@@ -231,19 +249,7 @@ export async function dispatchWhatsAppDelivery(deliveryId: number): Promise<void
           messaging_product: 'whatsapp',
           to: toNumber,
           type: 'template',
-          template: {
-            name: templateName,
-            language: { code: langCode },
-            components: [
-              {
-                type: 'body',
-                parameters: [
-                  { type: 'text', text: row.patient_name },
-                  { type: 'text', text: row.alert_message.slice(0, 200) },
-                ],
-              },
-            ],
-          },
+          template: templatePayload,
         }),
       }
     );
