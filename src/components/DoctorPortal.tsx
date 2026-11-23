@@ -32,6 +32,7 @@ import type {
   Medication,
   MedicationLog,
   MedicationSchedule,
+  NotificationDelivery,
   NurseSummary,
   Patient,
   PatientDocument,
@@ -445,7 +446,7 @@ export function DoctorPortal({ tab, setTab, session, onNotice }: DoctorPortalPro
     setBusyAction(true);
     try {
       const firstMed = patientMeds[0];
-      await apiFetch('/api/notifications/test-reminder', {
+      const res = await apiFetch<{ deliveries?: NotificationDelivery[] }>('/api/notifications/test-reminder', {
         method: 'POST',
         body: JSON.stringify({
           patient_id: patientId,
@@ -455,7 +456,18 @@ export function DoctorPortal({ tab, setTab, session, onNotice }: DoctorPortalPro
         }),
       });
       await Promise.all([loadWorkspace(), ...(selectedPatientId ? [loadPatientDetail(selectedPatientId)] : [])]);
-      onNotice('Multilingual WhatsApp & Voice reminder dispatched to patient phone.');
+      const wa = res.deliveries?.find((d) => d.channel === 'WhatsApp');
+      if (wa?.status === 'Sent') {
+        onNotice(`WhatsApp Sent to ${wa.recipient_phone}${wa.provider_reference ? ` (${wa.provider_reference})` : ''}.`);
+      } else if (wa?.status === 'Failed') {
+        onNotice(`WhatsApp Failed (${wa.recipient_phone}): ${wa.error_message || 'Check Meta API credentials and recipient whitelist.'}`);
+      } else if (wa?.status === 'Simulated') {
+        onNotice(`WhatsApp Simulated: ${wa.error_message || 'Set Meta WhatsApp secrets for live delivery.'}`);
+      } else if (wa?.status === 'Cancelled') {
+        onNotice(`WhatsApp Cancelled: ${wa.error_message || 'Patient opted out of WhatsApp reminders.'}`);
+      } else {
+        onNotice('Multilingual WhatsApp & Voice reminder dispatched to patient phone.');
+      }
     } catch (err) {
       onNotice(err instanceof Error ? err.message : 'Could not send test reminder.');
     } finally {
@@ -1726,7 +1738,13 @@ export function DoctorPortal({ tab, setTab, session, onNotice }: DoctorPortalPro
                             <div className="text-[11px] text-slate-600 mt-0.5">
                               Delivery: <strong>{d.status}</strong> · Confirmation:{' '}
                               <strong>{d.confirmation_status}</strong>
+                              {d.provider_reference ? ` · Ref: ${d.provider_reference}` : ''}
                             </div>
+                            {d.error_message && (
+                              <div className="text-[11px] text-rose-700 font-medium mt-1">
+                                {d.error_message}
+                              </div>
+                            )}
                           </div>
                           {d.channel === 'Voice' && d.confirmation_status === 'Awaiting' && (
                             <button
