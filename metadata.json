@@ -2,5 +2,7 @@
   "name": "SmartCare — Post-Discharge Patient Recovery Platform",
   "description": "Role-based post-discharge patient recovery, medication reminder, nurse coordination, and clinical monitoring platform.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
