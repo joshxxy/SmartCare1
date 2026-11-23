@@ -271,6 +271,46 @@ export function initializeDatabase(): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS whatsapp_reminders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      patient_id INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+      created_by_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      created_by_role TEXT NOT NULL CHECK (created_by_role IN ('doctor', 'nurse')),
+      created_by_name TEXT NOT NULL DEFAULT '',
+      recipient_phone TEXT NOT NULL,
+      reminder_type TEXT NOT NULL CHECK (reminder_type IN ('BP Check-up', 'Blood Sugar Test', 'Medicine', 'Doctor Appointment', 'Caregiver Visit')),
+      language TEXT NOT NULL DEFAULT 'English' CHECK (language IN ('English', 'Tamil', 'Malayalam')),
+      scheduled_date TEXT NOT NULL,
+      scheduled_time TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      message_text TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending', 'Sent (Unconfirmed)', 'Delivered', 'Cancelled')),
+      sent_at TEXT,
+      delivered_confirmed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS automated_whatsapp_reminders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      patient_id INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+      created_by_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      created_by_role TEXT NOT NULL CHECK (created_by_role IN ('doctor', 'nurse')),
+      created_by_name TEXT NOT NULL DEFAULT '',
+      recipient_phone TEXT NOT NULL,
+      masked_phone TEXT NOT NULL,
+      reminder_type TEXT NOT NULL CHECK (reminder_type IN ('BP', 'Blood Sugar', 'Medicine', 'Doctor Appointment', 'Nurse Visit')),
+      language TEXT NOT NULL DEFAULT 'English' CHECK (language IN ('English', 'Tamil', 'Malayalam')),
+      scheduled_date TEXT NOT NULL,
+      scheduled_time TEXT NOT NULL,
+      scheduled_at TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      message_text TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending', 'Sending', 'Sent', 'Failed')),
+      error_reason TEXT NOT NULL DEFAULT '',
+      sent_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_patients_doctor ON patients(doctor_id);
     CREATE INDEX IF NOT EXISTS idx_assignments_nurse ON nurse_patient_assignments(nurse_id, is_active);
     CREATE INDEX IF NOT EXISTS idx_assignments_patient ON nurse_patient_assignments(patient_id, is_active);
@@ -281,6 +321,10 @@ export function initializeDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_visits_nurse ON follow_up_visits(nurse_id, status, scheduled_at);
     CREATE INDEX IF NOT EXISTS idx_alerts_patient ON alerts(patient_id, status);
     CREATE INDEX IF NOT EXISTS idx_deliveries_due ON notification_deliveries(status, scheduled_at);
+    CREATE INDEX IF NOT EXISTS idx_wa_reminders_patient ON whatsapp_reminders(patient_id, scheduled_date, scheduled_time);
+    CREATE INDEX IF NOT EXISTS idx_wa_reminders_status ON whatsapp_reminders(status, scheduled_date);
+    CREATE INDEX IF NOT EXISTS idx_auto_wa_patient ON automated_whatsapp_reminders(patient_id, scheduled_at);
+    CREATE INDEX IF NOT EXISTS idx_auto_wa_status ON automated_whatsapp_reminders(status, scheduled_at);
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
   `);
 

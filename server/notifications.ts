@@ -744,6 +744,33 @@ export async function processDueNotifications(): Promise<{
       )
       .run(nowIso);
 
+    // 6. Auto-process due scheduled automated WhatsApp reminders (DEMO MODE simulation)
+    const dueAutoReminders = db
+      .prepare(
+        `SELECT id, recipient_phone
+         FROM automated_whatsapp_reminders
+         WHERE status = 'Pending' AND scheduled_at <= ?
+         LIMIT 50`
+      )
+      .all(nowIso) as Array<{ id: number; recipient_phone: string }>;
+
+    for (const item of dueAutoReminders) {
+      const digits = item.recipient_phone.replace(/\D/g, '');
+      if (digits.length < 8) {
+        db.prepare(
+          `UPDATE automated_whatsapp_reminders
+           SET status = 'Failed', error_reason = 'Invalid or missing patient phone number (simulated).'
+           WHERE id = ?`
+        ).run(item.id);
+      } else {
+        db.prepare(
+          `UPDATE automated_whatsapp_reminders
+           SET status = 'Sent', sent_at = ?, error_reason = ''
+           WHERE id = ?`
+        ).run(nowIso, item.id);
+      }
+    }
+
     return {
       schedulesTriggered,
       deliveriesDispatched,
@@ -754,6 +781,73 @@ export async function processDueNotifications(): Promise<{
   } finally {
     isProcessing = false;
   }
+}
+
+export type AutomatedReminderType =
+  | 'BP'
+  | 'Blood Sugar'
+  | 'Medicine'
+  | 'Doctor Appointment'
+  | 'Nurse Visit';
+
+export function maskPhoneNumber(phone: string): string {
+  const trimmed = phone.trim();
+  if (!trimmed) return 'Not registered';
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length < 6) return '******';
+  const last4 = digits.slice(-4);
+  const countryMatch = trimmed.match(/^(\+\d{1,3})[\s-]*/);
+  if (countryMatch) {
+    return `${countryMatch[1]} ******${last4}`;
+  }
+  return `******${last4}`;
+}
+
+export function buildAutomatedDemoMessage(params: {
+  patientName: string;
+  reminderType: AutomatedReminderType;
+  scheduledDate: string;
+  scheduledTime: string;
+  language: SupportedLanguage;
+  notes?: string;
+}): string {
+  const name = params.patientName.trim() || 'Patient';
+  const dateParts = params.scheduledDate.split('-');
+  const dateLabel =
+    dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : params.scheduledDate;
+  const noteSuffix = params.notes?.trim() ? ` Notes: ${params.notes.trim()}.` : '';
+
+  if (params.language === 'Tamil') {
+    const taAction: Record<AutomatedReminderType, string> = {
+      BP: 'உங்கள் இரத்த அழுத்தத்தை (BP) பரிசோதித்து பதிவு செய்யவும்.',
+      'Blood Sugar': 'உங்கள் இரத்த சர்க்கரை அளவை (Blood Sugar) பரிசோதிக்கவும்.',
+      Medicine: 'உங்கள் பரிந்துரைக்கப்பட்ட மருந்தை உட்கொள்ளவும்.',
+      'Doctor Appointment': 'உங்கள் மருத்துவர் ஆலோசனை நேரம் நெருங்குகிறது.',
+      'Nurse Visit': 'உங்கள் வீட்டு செவிலியர் (Nurse) வருகை திட்டமிடப்பட்டுள்ளது.',
+    };
+    return `வணக்கம் ${name}, SmartCare தானியங்கி நினைவூட்டல் (${dateLabel} ${params.scheduledTime}): ${taAction[params.reminderType]}${noteSuffix}`;
+  }
+
+  if (params.language === 'Malayalam') {
+    const mlAction: Record<AutomatedReminderType, string> = {
+      BP: 'നിങ്ങളുടെ രക്തസമ്മർദ്ദം (BP) പരിശോധിച്ച് രേഖപ്പെടുത്തുക.',
+      'Blood Sugar': 'നിങ്ങളുടെ ബ്ലഡ് ഷുഗർ അളവ് പരിശോധിക്കുക.',
+      Medicine: 'നിശ്ചിത സമയത്തെ മരുന്ന് കഴിക്കാൻ ഓർക്കുക.',
+      'Doctor Appointment': 'നിങ്ങളുടെ ഡോക്ടർ അപ്പോയിന്റ്മെന്റ് സമയം ഓർമ്മിപ്പിക്കുന്നു.',
+      'Nurse Visit': 'നിങ്ങളുടെ നഴ്സ് സന്ദർശനം ഷെഡ്യൂൾ ചെയ്തിരിക്കുന്നു.',
+    };
+    return `നമസ്കാരം ${name}, SmartCare ഓട്ടോമേറ്റഡ് ഓർമ്മപ്പെടുത്തൽ (${dateLabel} ${params.scheduledTime}): ${mlAction[params.reminderType]}${noteSuffix}`;
+  }
+
+  const enAction: Record<AutomatedReminderType, string> = {
+    BP: 'Time for your scheduled Blood Pressure (BP) reading and log in SmartCare.',
+    'Blood Sugar': 'Time for your scheduled Blood Sugar check. Please record your reading.',
+    Medicine: 'Reminder to take your prescribed medication on schedule.',
+    'Doctor Appointment': 'Friendly reminder about your upcoming Doctor Appointment.',
+    'Nurse Visit': 'Your home recovery Nurse Visit is scheduled.',
+  };
+
+  return `Hello ${name}, this is an automated SmartCare reminder (${dateLabel} at ${params.scheduledTime}): ${enAction[params.reminderType]}${noteSuffix}`;
 }
 
 let schedulerTask: ReturnType<typeof cron.schedule> | null = null;

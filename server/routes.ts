@@ -5,6 +5,7 @@ import express, { type Request, type Response } from 'express';
 import multer from 'multer';
 import { db, runInTransaction } from './db.ts';
 import {
+  buildAutomatedDemoMessage,
   buildTwimlForDelivery,
   confirmAlertAndStopRetries,
   dispatchVoiceDelivery,
@@ -12,8 +13,10 @@ import {
   escalateMissedVoiceReminder,
   generateMedicationSchedules,
   getProviderConfigStatus,
+  maskPhoneNumber,
   processDueNotifications,
   WHATSAPP_MESSAGES,
+  type AutomatedReminderType,
   type SupportedLanguage,
 } from './notifications.ts';
 import {
@@ -2338,5 +2341,528 @@ export function registerApiRoutes(app: express.Application): void {
       message: 'Fictional sample cohort created.',
       ...result,
     });
+  });
+
+  // ==========================================================
+  // WHATSAPP REMINDERS (CLICK-TO-CHAT SCHEDULING & HISTORY)
+  // ==========================================================
+  const VALID_WA_REMINDER_TYPES = new Set([
+    'BP Check-up',
+    'Blood Sugar Test',
+    'Medicine',
+    'Doctor Appointment',
+    'Caregiver Visit',
+  ]);
+  const VALID_WA_REMINDER_STATUSES = new Set([
+    'Pending',
+    'Sent (Unconfirmed)',
+    'Delivered',
+    'Cancelled',
+  ]);
+
+  app.get('/api/whatsapp-reminders', requireAuth, requireRoles('doctor', 'nurse'), (req: AuthenticatedRequest, res: Response) => {
+    const patientIds = getAccessiblePatientIds(req.user!);
+    if (patientIds.length === 0) {
+      res.json({
+        reminders: [],
+        stats: { total: 0, sent: 0, upcoming: 0, pending: 0, delivered: 0 },
+      });
+      return;
+    }
+
+    const placeholders = patientIds.map(() => '?').join(',');
+    const reminders = db
+      .prepare(
+        `SELECT wr.*, p.name AS patient_name, p.patient_code, p.opt_in_whatsapp
+         FROM whatsapp_reminders wr
+         JOIN patients p ON p.id = wr.patient_id
+         WHERE wr.patient_id IN (${placeholders})
+         ORDER BY wr.scheduled_date DESC, wr.scheduled_time DESC, wr.id DESC
+         LIMIT 200`
+      )
+      .all(...patientIds) as Array<{
+        id: number;
+        status: string;
+        scheduled_date: string;
+        scheduled_time: string;
+      }>;
+
+    const rawNowLocal = typeof req.query.now_local === 'string' ? req.query.now_local.trim() : '';
+    const nowRef = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(rawNowLocal)
+      ? rawNowLocal
+      : new Date().toISOString().slice(0, 16);
+
+    let sent = 0;
+    let upcoming = 0;
+    let pending = 0;
+    let delivered = 0;
+
+    for (const r of reminders) {
+      if (r.status === 'Delivered') {
+        delivered += 1;
+        sent += 1;
+      } else if (r.status === 'Sent (Unconfirmed)') {
+        sent += 1;
+      } else if (r.status === 'Pending') {
+        pending += 1;
+        const schedKey = `${r.scheduled_date}T${r.scheduled_time}`;
+        if (schedKey >= nowRef) {
+          upcoming += 1;
+        }
+      }
+    }
+
+    res.json({
+      reminders,
+      stats: {
+        total: reminders.length,
+        sent,
+        upcoming,
+        pending,
+        delivered,
+      },
+    });
+  });
+
+  app.post('/api/whatsapp-reminders', requireAuth, requireRoles('doctor', 'nurse'), (req: AuthenticatedRequest, res: Response) => {
+    const patientId = Number(req.body?.patient_id);
+    const reminderType = String(req.body?.reminder_type || '').trim();
+    const scheduledDate = String(req.body?.scheduled_date || '').trim();
+    const scheduledTime = String(req.body?.scheduled_time || '').trim();
+    const notes = String(req.body?.notes || '').trim().slice(0, 300);
+    const messageText = String(req.body?.message_text || '').trim().slice(0, 1200);
+    const requestedLang = String(req.body?.language || 'English').trim();
+    const initialStatus =
+      req.body?.initial_status === 'Sent (Unconfirmed)' ? 'Sent (Unconfirmed)' : 'Pending';
+
+    if (!ensurePatientExistsAndAccess(req.user!, patientId, res)) return;
+
+    if (!VALID_WA_REMINDER_TYPES.has(reminderType)) {
+      res.status(400).json({ detail: 'Invalid reminder type selected.' });
+      return;
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(scheduledDate) || !/^\d{2}:\d{2}$/.test(scheduledTime)) {
+      res.status(400).json({ detail: 'Valid date (YYYY-MM-DD) and time (HH:MM) are required.' });
+      return;
+    }
+    if (!isValidLanguage(requestedLang)) {
+      res.status(400).json({ detail: 'Language must be English, Tamil, or Malayalam.' });
+      return;
+    }
+    if (!messageText) {
+      res.status(400).json({ detail: 'Reminder message preview cannot be empty.' });
+      return;
+    }
+
+    const patient = db
+      .prepare(`SELECT id, name, patient_code, phone, opt_in_whatsapp FROM patients WHERE id = ?`)
+      .get(patientId) as
+      | { id: number; name: string; patient_code: string; phone: string; opt_in_whatsapp: number }
+      | undefined;
+
+    if (!patient || !patient.phone.trim()) {
+      res.status(400).json({ detail: 'Selected patient does not have a registered phone number.' });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const sentAt = initialStatus === 'Sent (Unconfirmed)' ? nowIso : null;
+
+    const info = db
+      .prepare(
+        `INSERT INTO whatsapp_reminders
+          (patient_id, created_by_user_id, created_by_role, created_by_name, recipient_phone, reminder_type, language, scheduled_date, scheduled_time, notes, message_text, status, sent_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        patientId,
+        req.user!.id,
+        req.user!.role,
+        req.user!.full_name || req.user!.username,
+        patient.phone.trim(),
+        reminderType,
+        requestedLang,
+        scheduledDate,
+        scheduledTime,
+        notes,
+        messageText,
+        initialStatus,
+        sentAt
+      );
+
+    const createdId = Number(info.lastInsertRowid);
+    const created = db
+      .prepare(
+        `SELECT wr.*, p.name AS patient_name, p.patient_code, p.opt_in_whatsapp
+         FROM whatsapp_reminders wr
+         JOIN patients p ON p.id = wr.patient_id
+         WHERE wr.id = ?`
+      )
+      .get(createdId);
+
+    recordAuditLog({
+      user: req.user,
+      action: 'WHATSAPP_REMINDER_CREATED',
+      entityType: 'whatsapp_reminder',
+      entityId: createdId,
+      details: `${reminderType} reminder (${initialStatus}) scheduled for ${patient.patient_code} on ${scheduledDate} ${scheduledTime}`,
+      ipAddress: getClientIp(req),
+    });
+
+    res.status(201).json({ reminder: created });
+  });
+
+  app.patch('/api/whatsapp-reminders/:id/status', requireAuth, requireRoles('doctor', 'nurse'), (req: AuthenticatedRequest, res: Response) => {
+    const reminderId = Number(req.params.id);
+    const nextStatus = String(req.body?.status || '').trim();
+
+    if (!VALID_WA_REMINDER_STATUSES.has(nextStatus)) {
+      res.status(400).json({ detail: 'Invalid WhatsApp reminder status.' });
+      return;
+    }
+
+    const existing = db
+      .prepare(`SELECT id, patient_id, status FROM whatsapp_reminders WHERE id = ?`)
+      .get(reminderId) as { id: number; patient_id: number; status: string } | undefined;
+
+    if (!existing) {
+      res.status(404).json({ detail: 'WhatsApp reminder not found.' });
+      return;
+    }
+    if (!ensurePatientExistsAndAccess(req.user!, existing.patient_id, res)) return;
+
+    const nowIso = new Date().toISOString();
+    if (nextStatus === 'Sent (Unconfirmed)') {
+      db.prepare(
+        `UPDATE whatsapp_reminders SET status = ?, sent_at = COALESCE(sent_at, ?) WHERE id = ?`
+      ).run(nextStatus, nowIso, reminderId);
+    } else if (nextStatus === 'Delivered') {
+      db.prepare(
+        `UPDATE whatsapp_reminders SET status = ?, sent_at = COALESCE(sent_at, ?), delivered_confirmed_at = ? WHERE id = ?`
+      ).run(nextStatus, nowIso, nowIso, reminderId);
+    } else {
+      db.prepare(`UPDATE whatsapp_reminders SET status = ? WHERE id = ?`).run(nextStatus, reminderId);
+    }
+
+    const updated = db
+      .prepare(
+        `SELECT wr.*, p.name AS patient_name, p.patient_code, p.opt_in_whatsapp
+         FROM whatsapp_reminders wr
+         JOIN patients p ON p.id = wr.patient_id
+         WHERE wr.id = ?`
+      )
+      .get(reminderId);
+
+    recordAuditLog({
+      user: req.user,
+      action: 'WHATSAPP_REMINDER_STATUS_UPDATED',
+      entityType: 'whatsapp_reminder',
+      entityId: reminderId,
+      details: `Updated WhatsApp reminder #${reminderId} status to ${nextStatus}`,
+      ipAddress: getClientIp(req),
+    });
+
+    res.json({ reminder: updated });
+  });
+
+  // ==========================================================
+  // AUTOMATED WHATSAPP REMINDERS (IN-APP DEMO MODE)
+  // ==========================================================
+  const VALID_AUTO_REMINDER_TYPES = new Set<AutomatedReminderType>([
+    'BP',
+    'Blood Sugar',
+    'Medicine',
+    'Doctor Appointment',
+    'Nurse Visit',
+  ]);
+  const VALID_AUTO_REMINDER_STATUSES = new Set(['Pending', 'Sending', 'Sent', 'Failed']);
+
+  const AUTO_WA_SELECT = `
+    SELECT awr.id, awr.patient_id, awr.created_by_user_id, awr.created_by_role,
+           awr.created_by_name, awr.masked_phone, awr.reminder_type, awr.language,
+           awr.scheduled_date, awr.scheduled_time, awr.scheduled_at, awr.notes,
+           awr.message_text, awr.status, awr.error_reason, awr.sent_at, awr.created_at,
+           p.name AS patient_name, p.patient_code
+    FROM automated_whatsapp_reminders awr
+    JOIN patients p ON p.id = awr.patient_id
+  `;
+
+  app.get('/api/automated-whatsapp-reminders', requireAuth, requireRoles('doctor', 'nurse'), (req: AuthenticatedRequest, res: Response) => {
+    const patientIds = getAccessiblePatientIds(req.user!);
+    if (patientIds.length === 0) {
+      res.json({
+        reminders: [],
+        stats: { total: 0, sent: 0, pending: 0, failed: 0 },
+      });
+      return;
+    }
+
+    const placeholders = patientIds.map(() => '?').join(',');
+    const reminders = db
+      .prepare(
+        `${AUTO_WA_SELECT}
+         WHERE awr.patient_id IN (${placeholders})
+         ORDER BY awr.scheduled_at DESC, awr.id DESC
+         LIMIT 200`
+      )
+      .all(...patientIds) as Array<{ id: number; status: string }>;
+
+    let sent = 0;
+    let pending = 0;
+    let failed = 0;
+    for (const r of reminders) {
+      if (r.status === 'Sent') sent += 1;
+      else if (r.status === 'Failed') failed += 1;
+      else pending += 1;
+    }
+
+    res.json({
+      reminders,
+      stats: {
+        total: reminders.length,
+        sent,
+        pending,
+        failed,
+      },
+    });
+  });
+
+  app.post('/api/automated-whatsapp-reminders', requireAuth, requireRoles('doctor', 'nurse'), (req: AuthenticatedRequest, res: Response) => {
+    const patientId = Number(req.body?.patient_id);
+    const reminderType = String(req.body?.reminder_type || '').trim() as AutomatedReminderType;
+    const scheduledDate = String(req.body?.scheduled_date || '').trim();
+    const scheduledTime = String(req.body?.scheduled_time || '').trim();
+    const notes = String(req.body?.notes || '').trim().slice(0, 250);
+    const requestedLang = String(req.body?.language || 'English').trim();
+    const rawScheduledAtIso = typeof req.body?.scheduled_at_iso === 'string' ? req.body.scheduled_at_iso.trim() : '';
+
+    if (!ensurePatientExistsAndAccess(req.user!, patientId, res)) return;
+    if (!VALID_AUTO_REMINDER_TYPES.has(reminderType)) {
+      res.status(400).json({ detail: 'Invalid reminder type selected.' });
+      return;
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(scheduledDate) || !/^\d{2}:\d{2}$/.test(scheduledTime)) {
+      res.status(400).json({ detail: 'Valid date (YYYY-MM-DD) and time (HH:MM) are required.' });
+      return;
+    }
+    if (!isValidLanguage(requestedLang)) {
+      res.status(400).json({ detail: 'Language must be English, Tamil, or Malayalam.' });
+      return;
+    }
+
+    const patient = db
+      .prepare(`SELECT id, name, patient_code, phone FROM patients WHERE id = ?`)
+      .get(patientId) as { id: number; name: string; patient_code: string; phone: string } | undefined;
+
+    if (!patient) {
+      res.status(404).json({ detail: 'Patient record not found.' });
+      return;
+    }
+
+    const parsedAt = rawScheduledAtIso ? new Date(rawScheduledAtIso) : null;
+    const scheduledAt =
+      parsedAt && !Number.isNaN(parsedAt.getTime())
+        ? parsedAt.toISOString()
+        : `${scheduledDate}T${scheduledTime}:00.000Z`;
+
+    const customMsg = typeof req.body?.message_text === 'string' ? req.body.message_text.trim().slice(0, 1000) : '';
+    const messageText =
+      customMsg ||
+      buildAutomatedDemoMessage({
+        patientName: patient.name,
+        reminderType,
+        scheduledDate,
+        scheduledTime,
+        language: requestedLang,
+        notes,
+      });
+
+    const maskedPhone = maskPhoneNumber(patient.phone || '');
+    const info = db
+      .prepare(
+        `INSERT INTO automated_whatsapp_reminders
+          (patient_id, created_by_user_id, created_by_role, created_by_name, recipient_phone, masked_phone, reminder_type, language, scheduled_date, scheduled_time, scheduled_at, notes, message_text, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')`
+      )
+      .run(
+        patientId,
+        req.user!.id,
+        req.user!.role,
+        req.user!.full_name || req.user!.username,
+        (patient.phone || '').trim(),
+        maskedPhone,
+        reminderType,
+        requestedLang,
+        scheduledDate,
+        scheduledTime,
+        scheduledAt,
+        notes,
+        messageText
+      );
+
+    const createdId = Number(info.lastInsertRowid);
+    const created = db.prepare(`${AUTO_WA_SELECT} WHERE awr.id = ?`).get(createdId);
+
+    recordAuditLog({
+      user: req.user,
+      action: 'AUTOMATED_WA_REMINDER_SCHEDULED',
+      entityType: 'automated_whatsapp_reminder',
+      entityId: createdId,
+      details: `Scheduled ${reminderType} automated reminder for ${patient.patient_code} (${scheduledDate} ${scheduledTime})`,
+      ipAddress: getClientIp(req),
+    });
+
+    res.status(201).json({ reminder: created });
+  });
+
+  app.post('/api/automated-whatsapp-reminders/seed-demo', requireAuth, requireRoles('doctor', 'nurse'), (req: AuthenticatedRequest, res: Response) => {
+    const patientIds = getAccessiblePatientIds(req.user!);
+    if (patientIds.length === 0) {
+      res.status(400).json({ detail: 'Register or assign at least one patient first to run the demo.' });
+      return;
+    }
+
+    const placeholders = patientIds.map(() => '?').join(',');
+    const existingPending = (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS cnt FROM automated_whatsapp_reminders
+           WHERE patient_id IN (${placeholders}) AND status = 'Pending'`
+        )
+        .get(...patientIds) as { cnt: number }
+    ).cnt;
+
+    if (existingPending > 0) {
+      res.json({ seeded: 0, message: 'Pending reminders already queued.' });
+      return;
+    }
+
+    const accessiblePatients = db
+      .prepare(
+        `SELECT id, name, patient_code, phone, language FROM patients WHERE id IN (${placeholders}) ORDER BY id ASC LIMIT 3`
+      )
+      .all(...patientIds) as Array<{
+        id: number;
+        name: string;
+        patient_code: string;
+        phone: string;
+        language: SupportedLanguage;
+      }>;
+
+    const now = new Date();
+    const todayDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const nowTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const nowIso = now.toISOString();
+
+    const demoTemplates: Array<{ type: AutomatedReminderType; notes: string }> = [
+      { type: 'BP', notes: 'Morning post-discharge blood pressure reading' },
+      { type: 'Medicine', notes: 'Prescribed morning recovery dose' },
+      { type: 'Blood Sugar', notes: 'Fasting glucose check' },
+    ];
+
+    const insertStmt = db.prepare(
+      `INSERT INTO automated_whatsapp_reminders
+        (patient_id, created_by_user_id, created_by_role, created_by_name, recipient_phone, masked_phone, reminder_type, language, scheduled_date, scheduled_time, scheduled_at, notes, message_text, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')`
+    );
+
+    const createdIds: number[] = [];
+    runInTransaction(() => {
+      demoTemplates.forEach((tpl, idx) => {
+        const pat = accessiblePatients[idx % accessiblePatients.length];
+        const lang: SupportedLanguage = isValidLanguage(pat.language) ? pat.language : 'English';
+        const msg = buildAutomatedDemoMessage({
+          patientName: pat.name,
+          reminderType: tpl.type,
+          scheduledDate: todayDate,
+          scheduledTime: nowTime,
+          language: lang,
+          notes: tpl.notes,
+        });
+        const r = insertStmt.run(
+          pat.id,
+          req.user!.id,
+          req.user!.role,
+          req.user!.full_name || req.user!.username,
+          (pat.phone || '').trim(),
+          maskPhoneNumber(pat.phone || ''),
+          tpl.type,
+          lang,
+          todayDate,
+          nowTime,
+          nowIso,
+          tpl.notes,
+          msg
+        );
+        createdIds.push(Number(r.lastInsertRowid));
+      });
+    });
+
+    res.status(201).json({ seeded: createdIds.length, ids: createdIds });
+  });
+
+  app.patch('/api/automated-whatsapp-reminders/:id/status', requireAuth, requireRoles('doctor', 'nurse'), (req: AuthenticatedRequest, res: Response) => {
+    const reminderId = Number(req.params.id);
+    const nextStatus = String(req.body?.status || '').trim();
+
+    if (!VALID_AUTO_REMINDER_STATUSES.has(nextStatus)) {
+      res.status(400).json({ detail: 'Invalid reminder status.' });
+      return;
+    }
+
+    const existing = db
+      .prepare(`SELECT id, patient_id, recipient_phone, reminder_type FROM automated_whatsapp_reminders WHERE id = ?`)
+      .get(reminderId) as
+      | { id: number; patient_id: number; recipient_phone: string; reminder_type: string }
+      | undefined;
+
+    if (!existing) {
+      res.status(404).json({ detail: 'Automated reminder not found.' });
+      return;
+    }
+    if (!ensurePatientExistsAndAccess(req.user!, existing.patient_id, res)) return;
+
+    const nowIso = new Date().toISOString();
+    let finalStatus = nextStatus;
+    let errorReason = '';
+
+    if (nextStatus === 'Sent') {
+      const digits = (existing.recipient_phone || '').replace(/\D/g, '');
+      if (digits.length < 8) {
+        finalStatus = 'Failed';
+        errorReason = 'Invalid or missing patient phone number (DEMO MODE check).';
+      }
+    } else if (nextStatus === 'Failed') {
+      errorReason = String(req.body?.error_reason || 'Simulated delivery failure for demo verification.').slice(0, 200);
+    }
+
+    if (finalStatus === 'Sent') {
+      db.prepare(
+        `UPDATE automated_whatsapp_reminders SET status = 'Sent', sent_at = ?, error_reason = '' WHERE id = ?`
+      ).run(nowIso, reminderId);
+      recordAuditLog({
+        user: req.user,
+        action: 'AUTOMATED_WA_DEMO_SENT',
+        entityType: 'automated_whatsapp_reminder',
+        entityId: reminderId,
+        details: `Simulated automated WhatsApp delivery (DEMO MODE) for ${existing.reminder_type} reminder #${reminderId}`,
+        ipAddress: getClientIp(req),
+      });
+    } else if (finalStatus === 'Failed') {
+      db.prepare(
+        `UPDATE automated_whatsapp_reminders SET status = 'Failed', sent_at = ?, error_reason = ? WHERE id = ?`
+      ).run(nowIso, errorReason, reminderId);
+    } else if (finalStatus === 'Sending') {
+      db.prepare(
+        `UPDATE automated_whatsapp_reminders SET status = 'Sending', error_reason = '' WHERE id = ?`
+      ).run(reminderId);
+    } else {
+      db.prepare(
+        `UPDATE automated_whatsapp_reminders SET status = 'Pending', sent_at = NULL, error_reason = '' WHERE id = ?`
+      ).run(reminderId);
+    }
+
+    const updated = db.prepare(`${AUTO_WA_SELECT} WHERE awr.id = ?`).get(reminderId);
+    res.json({ reminder: updated });
   });
 }

@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  MessageSquare,
   Settings,
   ShieldCheck,
   Users,
@@ -68,6 +69,7 @@ export default function App() {
     { id: 'patients', label: 'Patients & Plans', icon: Users },
     { id: 'appointments', label: 'Follow-Ups', icon: CalendarDays },
     { id: 'alerts', label: 'Reminders & Alerts', icon: Bell },
+    { id: 'whatsapp-reminders', label: 'Automated WhatsApp Reminders', icon: MessageSquare },
     { id: 'audit', label: 'Audit Logs', icon: ShieldCheck },
   ];
 
@@ -76,6 +78,7 @@ export default function App() {
     { id: 'patients', label: 'Assigned Patients', icon: Users },
     { id: 'followups', label: 'Visit Schedule', icon: CalendarDays },
     { id: 'alerts', label: 'Patient Alerts', icon: Bell },
+    { id: 'whatsapp-reminders', label: 'Automated WhatsApp Reminders', icon: MessageSquare },
   ];
 
   const patientNav: Array<{ id: PatientTab; label: string; icon: typeof LayoutDashboard }> = [

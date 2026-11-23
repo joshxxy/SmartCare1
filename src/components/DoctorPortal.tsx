@@ -40,8 +40,9 @@ import type {
   SupportedLanguage,
 } from '../types';
 import { VitalsChart } from './VitalsChart';
+import { WhatsAppRemindersPanel } from './WhatsAppRemindersPanel';
 
-export type DoctorTab = 'overview' | 'patients' | 'appointments' | 'alerts' | 'audit';
+export type DoctorTab = 'overview' | 'patients' | 'appointments' | 'alerts' | 'whatsapp-reminders' | 'audit';
 
 interface DoctorPortalProps {
   tab: DoctorTab;
@@ -458,7 +459,9 @@ export function DoctorPortal({ tab, setTab, session, onNotice }: DoctorPortalPro
       await Promise.all([loadWorkspace(), ...(selectedPatientId ? [loadPatientDetail(selectedPatientId)] : [])]);
       const wa = res.deliveries?.find((d) => d.channel === 'WhatsApp');
       if (wa?.status === 'Sent') {
-        onNotice(`WhatsApp Sent to ${wa.recipient_phone}${wa.provider_reference ? ` (${wa.provider_reference})` : ''}.`);
+        onNotice(
+          `WhatsApp reminder accepted by Meta for ${wa.recipient_phone}. Full delivery ID (wamid) is recorded in the Alerts log.`
+        );
       } else if (wa?.status === 'Failed') {
         onNotice(`WhatsApp Failed (${wa.recipient_phone}): ${wa.error_message || 'Check Meta API credentials and recipient whitelist.'}`);
       } else if (wa?.status === 'Simulated') {
@@ -1808,6 +1811,9 @@ export function DoctorPortal({ tab, setTab, session, onNotice }: DoctorPortalPro
           </div>
         </div>
       )}
+
+      {/* WHATSAPP REMINDERS TAB */}
+      {tab === 'whatsapp-reminders' && <WhatsAppRemindersPanel onNotice={onNotice} />}
 
       {/* REGISTER PATIENT MODAL */}
       {showRegisterModal && (

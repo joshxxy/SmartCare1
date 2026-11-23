@@ -247,3 +247,87 @@ export interface DashboardSummary {
   alerts: AlertItem[];
   providers: ProviderStatus;
 }
+
+export type WhatsAppReminderType =
+  | 'BP Check-up'
+  | 'Blood Sugar Test'
+  | 'Medicine'
+  | 'Doctor Appointment'
+  | 'Caregiver Visit';
+
+export type WhatsAppReminderStatus = 'Pending' | 'Sent (Unconfirmed)' | 'Delivered' | 'Cancelled';
+
+export interface WhatsAppReminder {
+  id: number;
+  patient_id: number;
+  patient_name: string;
+  patient_code: string;
+  opt_in_whatsapp: number;
+  created_by_user_id: number;
+  created_by_role: 'doctor' | 'nurse';
+  created_by_name: string;
+  recipient_phone: string;
+  reminder_type: WhatsAppReminderType;
+  language: SupportedLanguage;
+  scheduled_date: string;
+  scheduled_time: string;
+  notes: string;
+  message_text: string;
+  status: WhatsAppReminderStatus;
+  sent_at: string | null;
+  delivered_confirmed_at: string | null;
+  created_at: string;
+}
+
+export interface WhatsAppReminderDashboardData {
+  reminders: WhatsAppReminder[];
+  stats: {
+    total: number;
+    sent: number;
+    upcoming: number;
+    pending: number;
+    delivered: number;
+  };
+}
+
+export type AutomatedReminderType =
+  | 'BP'
+  | 'Blood Sugar'
+  | 'Medicine'
+  | 'Doctor Appointment'
+  | 'Nurse Visit';
+
+export type AutomatedReminderStatus = 'Pending' | 'Sending' | 'Sent' | 'Failed';
+
+export interface AutomatedWhatsAppReminder {
+  id: number;
+  patient_id: number;
+  patient_name: string;
+  patient_code: string;
+  created_by_user_id: number;
+  created_by_role: 'doctor' | 'nurse';
+  created_by_name: string;
+  masked_phone: string;
+  reminder_type: AutomatedReminderType;
+  language: SupportedLanguage;
+  scheduled_date: string;
+  scheduled_time: string;
+  scheduled_at: string;
+  notes: string;
+  message_text: string;
+  status: AutomatedReminderStatus;
+  error_reason: string;
+  sent_at: string | null;
+  created_at: string;
+}
+
+export interface AutomatedWhatsAppDashboardData {
+  reminders: AutomatedWhatsAppReminder[];
+  stats: {
+    total: number;
+    sent: number;
+    pending: number;
+    failed: number;
+  };
+}
+

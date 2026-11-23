@@ -22,8 +22,9 @@ import type {
   Session,
 } from '../types';
 import { VitalsChart } from './VitalsChart';
+import { WhatsAppRemindersPanel } from './WhatsAppRemindersPanel';
 
-export type NurseTab = 'overview' | 'patients' | 'followups' | 'alerts';
+export type NurseTab = 'overview' | 'patients' | 'followups' | 'alerts' | 'whatsapp-reminders';
 
 interface NursePortalProps {
   tab: NurseTab;
@@ -659,6 +660,8 @@ export function NursePortal({ tab, setTab, onNotice }: NursePortalProps) {
           )}
         </div>
       )}
+
+      {tab === 'whatsapp-reminders' && <WhatsAppRemindersPanel onNotice={onNotice} />}
     </div>
   );
 }
